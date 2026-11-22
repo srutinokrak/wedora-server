@@ -1,7 +1,7 @@
 import express from "express"
 import cors from "cors";
 import "dotenv/config";
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -12,10 +12,9 @@ app.use(express.json());
 app.use(cors());
 
 
-const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-mmcgsdf-shard-00-00.m4xd1qi.mongodb.net:27017,ac-mmcgsdf-shard-00-01.m4xd1qi.mongodb.net:27017,ac-mmcgsdf-shard-00-02.m4xd1qi.mongodb.net:27017/?ssl=true&replicaSet=atlas-wbfsly-shard-0&authSource=admin`
-);
+const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-mmcgsdf-shard-00-00.m4xd1qi.mongodb.net:27017,ac-mmcgsdf-shard-00-01.m4xd1qi.mongodb.net:27017,ac-mmcgsdf-shard-00-02.m4xd1qi.mongodb.net:27017/?ssl=true&replicaSet=atlas-wbfsly-shard-0&authSource=admin`);
 
-export async function connectToMongoDB() {
+async function connectToMongoDB() {
   try {
     await client.connect();
     console.log("You successfully connected to MongoDB!");
@@ -95,6 +94,47 @@ app.get("/services", async (req, res) => {
     res.status(500).json({ message: "Could not load services." });
   }
 });
-app.listen(port, () => {
-  console.log(`Wedora is running on port ${port}`);
+
+app.get("/services/:id", async (req, res) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid service ID." });
+  }
+
+  try {
+    const service = await services.findOne({
+      _id: new ObjectId(req.params.id),
+      status: "approved",
+      availability: "active",
+    });
+
+    if (!service) {
+      return res.status(404).json({ message: "Service not found." });
+    }
+
+    res.json({
+      id: service._id.toString(),
+      serviceName: service.serviceName || "Wedding Service",
+      category: service.category || "Wedding Service",
+      description: service.description || "",
+      price: typeof service.price === "number" ? service.price : 0,
+      location: service.location || "",
+      images: Array.isArray(service.images)
+        ? service.images.filter((image) => typeof image === "string" && image.trim())
+        : [],
+      vendorId: service.vendorId || "",
+      vendorName: service.vendorInfo?.name || "WedPlan Vendor",
+      vendorImage: service.vendorInfo?.image || "",
+    });
+  } catch (err) {
+    console.error("Could not fetch service details:", err);
+    res.status(500).json({ message: "Could not load service details." });
+  }
 });
+
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`Wedora is running on port ${port}`);
+  });
+}
+
+export default app;
