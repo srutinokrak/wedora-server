@@ -41,7 +41,7 @@ The client also needs `BETTER_AUTH_DB_URI`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID
 
 Premium costs $29 USD per month. The API creates a Stripe Checkout subscription only for the authenticated vendor. It saves a pending transaction before returning the Checkout URL. **The success page cannot activate Premium**; only a verified webhook can mark the transaction paid and enable the vendor subscription.
 
-The API verifies Stripe's `stripe-signature` against the raw request body before processing events. Configure these events at `https://YOUR_API_HOST/stripe/webhook`:
+The API verifies Stripe's `stripe-signature` against the raw request body before processing events. Configure these events at `https://wedora-server-nine.vercel.app/`:
 
 - `checkout.session.completed`
 - `checkout.session.async_payment_succeeded`
@@ -63,7 +63,7 @@ The vendor can cancel Premium from the subscription dashboard. Cancellation take
 
 - Client: https://github.com/srutinokrak/wedora-client
 - Server: https://github.com/srutinokrak/wedora-server
-- Live website: **Add the deployed client URL before submission.**
-- Live API: **Add the deployed API URL before submission.**
+- Live website: https://wedora-client-five.vercel.app/
+- Live API: https://wedora-server-nine.vercel.app/
 
 Deploy the API and client separately. Set production environment variables in each host's secret settings, and register the production webhook endpoint in Stripe.
