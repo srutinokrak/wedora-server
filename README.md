@@ -39,7 +39,7 @@ The client also needs `BETTER_AUTH_DB_URI`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID
 
 ## Premium subscription and webhooks
 
-Premium costs $29 USD per month. The API creates a Stripe Checkout subscription only for the authenticated vendor. It saves a pending transaction before returning the Checkout URL. **The success page cannot activate Premium**; only a verified webhook can mark the transaction paid and enable the vendor subscription.
+Premium costs $29 USD per month. The API creates a Stripe Checkout subscription only for the authenticated vendor. It saves a pending transaction before returning the Checkout URL. **The success page can't activate Premium**; only a verified webhook can mark the transaction paid and enable the vendor subscription.
 
 The API verifies Stripe's `stripe-signature` against the raw request body before processing events. Configure these events at `https://wedora-server-nine.vercel.app/`:
 
