@@ -1170,7 +1170,7 @@ app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
   }
 });
 
-// POST /vendor/subscription/checkout — create a Stripe test subscription.
+
 app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
   try {
     if (!stripe || !process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) {
