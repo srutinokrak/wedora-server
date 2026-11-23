@@ -243,8 +243,8 @@ app.get("/admin/users", verifyAdminJwt, async (req, res) => {
       const search = req.query.q.trim().replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
       filter.$or = [{ name: { $regex: search, $options: "i" } }, { email: { $regex: search, $options: "i" } }];
     }
-    const docs = await users.find(filter, { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, createdAt: 1, businessName: 1 } }).sort({ createdAt: -1 }).limit(200).toArray();
-    res.json(docs.map((user) => ({ id: user._id.toString(), name: user.name || "Unnamed user", email: user.email || "", image: user.image || "", role: user.role || "customer", isBlocked: Boolean(user.isBlocked), createdAt: user.createdAt || null, businessName: user.businessName || "" })));
+    const docs = await users.find(filter, { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, createdAt: 1, businessName: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, emailVerified: 1 } }).sort({ createdAt: -1 }).limit(200).toArray();
+    res.json(docs.map((user) => ({ id: user._id.toString(), name: user.name || "Unnamed user", email: user.email || "", image: user.image || "", role: user.role || "customer", isBlocked: Boolean(user.isBlocked), createdAt: user.createdAt || null, businessName: user.businessName || "", subscriptionPlan: user.subscriptionPlan || "", subscriptionExpiresAt: user.subscriptionExpiresAt || null, emailVerified: Boolean(user.emailVerified) })));
   } catch (err) {
     console.error("GET /admin/users:", err);
     res.status(500).json({ message: "Could not load users." });
@@ -374,10 +374,10 @@ app.post("/customer/bookings", verifyCustomerJwt, async (req, res) => {
     if (service.vendorId === req.customerId) return res.status(403).json({ message: "You cannot book your own service." });
 
     const existingRequest = await bookings.findOne({
-      serviceId: service._id.toString(), customerId: req.customerId, eventDate,
+      serviceId: service._id.toString(), eventDate,
       status: { $in: ["pending", "accepted"] },
     });
-    if (existingRequest) return res.status(409).json({ message: "You already have an active request for this service and event date." });
+    if (existingRequest) return res.status(409).json({ message: "This service already has an active booking request for that event date." });
 
     const booking = {
       serviceId: service._id.toString(),
