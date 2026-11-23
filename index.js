@@ -67,14 +67,18 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
       }
 
       const vendorId = session.metadata?.vendorId
+      const subscriptionId = typeof session.subscription === "string"
+        ? session.subscription
+        : session.subscription?.id
       if (
-        session.mode !== "payment" ||
+        session.mode !== "subscription" ||
         session.status !== "complete" ||
         session.amount_total !== 2900 ||
         session.currency !== "usd" ||
         session.client_reference_id !== vendorId ||
         session.metadata?.plan !== "premium" ||
         session.metadata?.amountCents !== "2900" ||
+        typeof subscriptionId !== "string" ||
         typeof vendorId !== "string"
       ) {
         return res.status(400).json({ message: "Checkout session details did not match." })
@@ -96,9 +100,10 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
 
       await transactions.updateOne(
         { _id: transaction._id, status: "pending" },
-        { $set: { status: "paid" } }
+        { $set: { status: "paid", stripeSubscriptionId: subscriptionId } }
       )
-      await activateVendorPremium(vendorId)
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId)
+      await activateVendorPremium(vendorId, subscription)
     } else if (event.type === "checkout.session.expired") {
       const session = event.data.object
       await transactions.updateOne(
@@ -111,6 +116,39 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
         { stripeSessionId: session.id, status: "pending" },
         { $set: { status: "failed" } }
       )
+    } else if (event.type === "customer.subscription.updated") {
+      const subscription = event.data.object
+      const vendorId = subscription.metadata?.vendorId
+      const vendor = typeof vendorId === "string"
+        ? await users.findOne({ _id: vendorId, role: "vendor" })
+        : await users.findOne({ stripeSubscriptionId: subscription.id, role: "vendor" })
+      if (vendor) {
+        if (subscription.status === "active" || subscription.status === "trialing") {
+          await activateVendorPremium(vendor._id.toString(), subscription)
+          await users.updateOne(
+            { _id: vendor._id },
+            { $set: { subscriptionCancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end) } }
+          )
+        } else {
+          await deactivateVendorPremium(vendor._id.toString())
+        }
+      }
+    } else if (event.type === "customer.subscription.deleted") {
+      const subscription = event.data.object
+      const vendorId = subscription.metadata?.vendorId
+      const vendor = typeof vendorId === "string"
+        ? await users.findOne({ _id: vendorId, role: "vendor" })
+        : await users.findOne({ stripeSubscriptionId: subscription.id, role: "vendor" })
+      if (vendor) await deactivateVendorPremium(vendor._id.toString())
+    } else if (event.type === "invoice.payment_failed") {
+      const invoice = event.data.object
+      const subscriptionId = typeof invoice.subscription === "string"
+        ? invoice.subscription
+        : invoice.subscription?.id
+      if (subscriptionId) {
+        const vendor = await users.findOne({ stripeSubscriptionId: subscriptionId, role: "vendor" })
+        if (vendor) await deactivateVendorPremium(vendor._id.toString())
+      }
     }
 
     res.json({ received: true })
@@ -130,14 +168,28 @@ async function vendorCanActivateService(vendorId, serviceId) {
   return (await services.countDocuments(filter)) < 3;
 }
 
-async function activateVendorPremium(vendorId) {
+async function activateVendorPremium(vendorId, subscription) {
+  const updates = {
+    subscriptionPlan: "premium",
+    stripeSubscriptionId: subscription?.id,
+    subscriptionExpiresAt: subscription?.current_period_end
+      ? new Date(subscription.current_period_end * 1000)
+      : null,
+  }
+  await users.updateOne(
+    { _id: vendorId, role: "vendor" },
+    { $set: updates }
+  );
+}
+
+async function deactivateVendorPremium(vendorId) {
   await users.updateOne(
     { _id: vendorId, role: "vendor" },
     {
-      $set: { subscriptionPlan: "premium", subscriptionExpiresAt: null },
-      $unset: { stripeSubscriptionId: "", subscriptionCancelAtPeriodEnd: "" },
+      $set: { subscriptionPlan: "free", subscriptionExpiresAt: null, subscriptionCancelAtPeriodEnd: false },
+      $unset: { stripeSubscriptionId: "" },
     }
-  );
+  )
 }
 
 function getAuthServerUrl() {
@@ -753,6 +805,8 @@ app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
       pendingRequests,
       acceptedBookings,
       subscriptionPlan: vendorUser?.subscriptionPlan || "free",
+      subscriptionExpiresAt: vendorUser?.subscriptionExpiresAt || null,
+      subscriptionCancelAtPeriodEnd: Boolean(vendorUser?.subscriptionCancelAtPeriodEnd),
     });
   } catch (err) {
     console.error("GET /vendor/overview:", err);
@@ -760,7 +814,7 @@ app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
   }
 });
 
-// POST /vendor/subscription/checkout — create a Stripe test Checkout session.
+// POST /vendor/subscription/checkout — create a Stripe test subscription.
 app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
   try {
     if (!stripe || !process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) {
@@ -768,18 +822,19 @@ app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
     }
     const { amountCents } = req.body;
     if (!Number.isInteger(amountCents) || amountCents !== 2900) {
-      return res.status(400).json({ message: "Premium costs $29.00 USD as a one-time payment." });
+      return res.status(400).json({ message: "Premium costs $29.00 USD per month." });
     }
     if (req.vendorUser.subscriptionPlan === "premium") return res.status(400).json({ message: "This vendor already has Premium." });
 
     const appUrl = getAppUrl();
     const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+      mode: "subscription",
       line_items: [{
         price_data: {
           currency: "usd",
           unit_amount: amountCents,
-          product_data: { name: "WedPlan Premium — Lifetime Access" },
+          recurring: { interval: "month" },
+          product_data: { name: "WedPlan Premium" },
         },
         quantity: 1,
       }],
@@ -788,6 +843,9 @@ app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
       client_reference_id: req.vendorId,
       customer_email: req.vendorUser.email || undefined,
       metadata: { vendorId: req.vendorId, plan: "premium", amountCents: String(amountCents) },
+      subscription_data: {
+        metadata: { vendorId: req.vendorId, plan: "premium" },
+      },
     });
 
     await transactions.updateOne(
@@ -810,39 +868,45 @@ app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
   }
 });
 
-// Confirm success directly with Stripe. The return URL itself never grants Premium.
-app.post("/vendor/subscription/confirm", verifyVendorJwt, async (req, res) => {
+app.get("/vendor/subscription/status/:sessionId", verifyVendorJwt, async (req, res) => {
   try {
-    if (!stripe || !process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) return res.status(503).json({ message: "Configure a Stripe test secret key on the server." });
-    const { sessionId } = req.body;
-    if (typeof sessionId !== "string" || !sessionId.startsWith("cs_")) {
-      return res.status(400).json({ message: "A valid Checkout Session ID is required." });
-    }
-
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    if (session.client_reference_id !== req.vendorId || session.metadata?.vendorId !== req.vendorId) {
-      return res.status(403).json({ message: "This Checkout Session belongs to another vendor." });
-    }
-    if (session.mode !== "payment" || session.status !== "complete" || session.payment_status !== "paid" || session.amount_total !== 2900 || session.currency !== "usd") {
-      return res.status(400).json({ message: "Payment is not complete yet." });
-    }
-    const transaction = await transactions.findOne({ stripeSessionId: session.id, vendorId: req.vendorId });
-    if (!transaction) return res.status(404).json({ message: "Checkout transaction was not found for this vendor." });
-
-    await activateVendorPremium(req.vendorId);
-    await transactions.updateOne(
-      { stripeSessionId: session.id, vendorId: req.vendorId },
-      { $set: {
-        plan: "premium",
-        amount: (session.amount_total || 0) / 100,
-        currency: session.currency || "usd",
-        status: "paid",
-      } }
-    );
-    res.json({ message: "Your one-time payment is confirmed. Premium is active for your account.", subscriptionPlan: "premium" });
+    const transaction = await transactions.findOne({
+      stripeSessionId: req.params.sessionId,
+      vendorId: req.vendorId,
+      plan: "premium",
+    }, { projection: { status: 1 } })
+    if (!transaction) return res.status(404).json({ message: "Checkout transaction was not found for this vendor." })
+    res.json({ status: transaction.status })
   } catch (err) {
-    console.error("POST /vendor/subscription/confirm:", err);
-    res.status(500).json({ message: "Could not verify the Stripe payment." });
+    console.error("GET /vendor/subscription/status/:sessionId:", err)
+    res.status(500).json({ message: "Could not check the payment status." })
+  }
+})
+
+app.post("/vendor/subscription/cancel", verifyVendorJwt, async (req, res) => {
+  try {
+    const subscriptionId = req.vendorUser.stripeSubscriptionId
+    if (!stripe || !subscriptionId) {
+      return res.status(400).json({ message: "No active Premium subscription was found." })
+    }
+    const subscription = await stripe.subscriptions.update(subscriptionId, {
+      cancel_at_period_end: true,
+    })
+    await users.updateOne(
+      { _id: req.vendorId, role: "vendor", stripeSubscriptionId: subscriptionId },
+      {
+        $set: {
+          subscriptionCancelAtPeriodEnd: true,
+          subscriptionExpiresAt: subscription.current_period_end
+            ? new Date(subscription.current_period_end * 1000)
+            : null,
+        },
+      }
+    )
+    res.json({ message: "Premium will remain active until the current billing period ends." })
+  } catch (err) {
+    console.error("POST /vendor/subscription/cancel:", err)
+    res.status(500).json({ message: "Could not cancel the subscription." })
   }
 });
 
