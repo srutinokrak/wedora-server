@@ -1,9 +1,15 @@
 import express from "express"
 import cors from "cors";
-import "dotenv/config";
+import dotenv from "dotenv";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { MongoClient, ObjectId } from 'mongodb';
+import Stripe from "stripe";
+const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(serverDirectory, ".env") });
 const app = express();
 const port = process.env.PORT || 5000;
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 
 
@@ -32,6 +38,38 @@ const bookings = database.collection("bookings")
 const transactions = database.collection("transactions")
 const users = database.collection("user")
 
+async function vendorCanActivateService(vendorId, serviceId) {
+  const vendor = await users.findOne({ _id: vendorId, role: "vendor" }, { projection: { subscriptionPlan: 1 } });
+  if (vendor?.subscriptionPlan === "premium") return true;
+  const filter = { vendorId, status: "approved", availability: "active" };
+  if (serviceId) filter._id = { $ne: new ObjectId(serviceId) };
+  return (await services.countDocuments(filter)) < 3;
+}
+
+async function activateVendorPremium(vendorId) {
+  await users.updateOne(
+    { _id: vendorId, role: "vendor" },
+    {
+      $set: { subscriptionPlan: "premium", subscriptionExpiresAt: null },
+      $unset: { stripeSubscriptionId: "", subscriptionCancelAtPeriodEnd: "" },
+    }
+  );
+}
+
+function getAuthServerUrl() {
+  return (process.env.BETTER_AUTH_URL || process.env.APP_URL || process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
+}
+
+function authSessionHeaders(token) {
+  return { Cookie: `better-auth.session_token=${token}; __Secure-better-auth.session_token=${token}` };
+}
+
+function getAppUrl() {
+  const url = process.env.APP_URL || process.env.CLIENT_URL;
+  if (!url) throw new Error("APP_URL must be configured for Stripe Checkout.");
+  return url.replace(/\/$/, "");
+}
+
 // --- Auth middleware ---
 // Validates Bearer token via Better Auth session endpoint on the Next.js app
 async function verifyVendorJwt(req, res, next) {
@@ -40,8 +78,8 @@ async function verifyVendorJwt(req, res, next) {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
     if (!token) return res.status(401).json({ message: "Missing auth token." });
 
-    const sessionRes = await fetch("http://localhost:3000/api/auth/get-session", {
-      headers: { Cookie: `better-auth.session_token=${token}` },
+    const sessionRes = await fetch(`${getAuthServerUrl()}/api/auth/get-session`, {
+      headers: authSessionHeaders(token),
     });
     if (!sessionRes.ok) return res.status(401).json({ message: "Invalid session." });
 
@@ -50,11 +88,11 @@ async function verifyVendorJwt(req, res, next) {
     if (!user || user.role !== "vendor") {
       return res.status(403).json({ message: "Access denied: vendors only." });
     }
-    const storedUser = await users.findOne({ _id: user.id }, { projection: { isBlocked: 1 } });
+    const storedUser = await users.findOne({ _id: user.id });
     if (storedUser?.isBlocked) return res.status(403).json({ message: "This account is blocked." });
 
     req.vendorId = user.id;
-    req.vendorUser = user;
+    req.vendorUser = { ...user, ...storedUser, id: user.id };
     next();
   } catch (err) {
     console.error("verifyVendorJwt error:", err);
@@ -68,8 +106,8 @@ async function verifyCustomerJwt(req, res, next) {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
     if (!token) return res.status(401).json({ message: "Missing auth token." });
 
-    const sessionRes = await fetch("http://localhost:3000/api/auth/get-session", {
-      headers: { Cookie: `better-auth.session_token=${token}` },
+    const sessionRes = await fetch(`${getAuthServerUrl()}/api/auth/get-session`, {
+      headers: authSessionHeaders(token),
     });
     if (!sessionRes.ok) return res.status(401).json({ message: "Invalid session." });
 
@@ -96,8 +134,8 @@ async function verifyAdminJwt(req, res, next) {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
     if (!token) return res.status(401).json({ message: "Missing auth token." });
 
-    const sessionRes = await fetch("http://localhost:3000/api/auth/get-session", {
-      headers: { Cookie: `better-auth.session_token=${token}` },
+    const sessionRes = await fetch(`${getAuthServerUrl()}/api/auth/get-session`, {
+      headers: authSessionHeaders(token),
     });
     if (!sessionRes.ok) return res.status(401).json({ message: "Invalid session." });
     const sessionData = await sessionRes.json();
@@ -294,6 +332,12 @@ app.patch("/admin/services/:id", verifyAdminJwt, async (req, res) => {
       updates.availability = req.body.availability;
     }
     if (!Object.keys(updates).length) return res.status(400).json({ message: "No valid service changes provided." });
+    const currentService = await services.findOne({ _id: new ObjectId(req.params.id) });
+    if (!currentService) return res.status(404).json({ message: "Service not found." });
+    const willBeActive = (updates.availability || currentService.availability) === "active" && (updates.status || currentService.status) === "approved";
+    if (willBeActive && (updates.availability === "active" || updates.status === "approved") && !(await vendorCanActivateService(currentService.vendorId, req.params.id))) {
+      return res.status(403).json({ message: "Free vendors can publish up to 3 active services. Upgrade to Premium to publish more." });
+    }
     const result = await services.findOneAndUpdate({ _id: new ObjectId(req.params.id) }, { $set: updates }, { returnDocument: "after" });
     if (!result) return res.status(404).json({ message: "Service not found." });
     res.json({ id: result._id.toString(), status: result.status, availability: result.availability });
@@ -524,6 +568,10 @@ app.patch("/vendor/services/:id", verifyVendorJwt, async (req, res) => {
     if (images !== undefined) updates.images = images;
     if (availability !== undefined) updates.availability = availability;
 
+    if (availability === "active" && existing.status === "approved" && !(await vendorCanActivateService(req.vendorId, req.params.id))) {
+      return res.status(403).json({ message: "Free vendors can publish up to 3 active services. Upgrade to Premium to publish more." });
+    }
+
     const result = await services.findOneAndUpdate(
       { _id: oid },
       { $set: updates },
@@ -603,6 +651,11 @@ app.patch("/vendor/bookings/:id", verifyVendorJwt, async (req, res) => {
 // GET /vendor/overview — dashboard stats
 app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
   try {
+    await transactions.updateMany(
+      { vendorId: req.vendorId, status: "pending", createdAt: { $lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+      { $set: { status: "expired" } }
+    );
+    const vendorUser = req.vendorUser;
     const [totalServices, activeServices, pendingRequests, acceptedBookings] = await Promise.all([
       services.countDocuments({ vendorId: req.vendorId }),
       services.countDocuments({ vendorId: req.vendorId, availability: "active", status: "approved" }),
@@ -615,7 +668,7 @@ app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
       activeServices,
       pendingRequests,
       acceptedBookings,
-      subscriptionPlan: req.vendorUser.subscriptionPlan || "free",
+      subscriptionPlan: vendorUser?.subscriptionPlan || "free",
     });
   } catch (err) {
     console.error("GET /vendor/overview:", err);
@@ -623,9 +676,90 @@ app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
   }
 });
 
-// POST /vendor/subscription/checkout — Stripe checkout (not yet configured)
+// POST /vendor/subscription/checkout — create a Stripe test Checkout session.
 app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
-  res.status(501).json({ message: "Stripe not yet configured. Install stripe package and add keys." });
+  try {
+    if (!stripe || !process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) {
+      return res.status(503).json({ message: "Configure a Stripe test secret key on the server." });
+    }
+    const { amountCents } = req.body;
+    if (!Number.isInteger(amountCents) || amountCents !== 2900) {
+      return res.status(400).json({ message: "Premium costs $29.00 USD as a one-time payment." });
+    }
+    if (req.vendorUser.subscriptionPlan === "premium") return res.status(400).json({ message: "This vendor already has Premium." });
+
+    const appUrl = getAppUrl();
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      line_items: [{
+        price_data: {
+          currency: "usd",
+          unit_amount: amountCents,
+          product_data: { name: "WedPlan Premium — Lifetime Access" },
+        },
+        quantity: 1,
+      }],
+      success_url: `${appUrl}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${appUrl}/dashboard/payment-cancel`,
+      client_reference_id: req.vendorId,
+      customer_email: req.vendorUser.email || undefined,
+      metadata: { vendorId: req.vendorId, plan: "premium", amountCents: String(amountCents) },
+    });
+
+    await transactions.updateOne(
+      { stripeSessionId: session.id },
+      { $setOnInsert: {
+        vendorId: req.vendorId,
+        plan: "premium",
+        amount: amountCents / 100,
+        currency: "usd",
+        stripeSessionId: session.id,
+        status: "pending",
+        createdAt: new Date(),
+      } },
+      { upsert: true }
+    );
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error("POST /vendor/subscription/checkout:", err);
+    res.status(500).json({ message: err.message || "Could not start Stripe Checkout." });
+  }
+});
+
+// Confirm success directly with Stripe. The return URL itself never grants Premium.
+app.post("/vendor/subscription/confirm", verifyVendorJwt, async (req, res) => {
+  try {
+    if (!stripe || !process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) return res.status(503).json({ message: "Configure a Stripe test secret key on the server." });
+    const { sessionId } = req.body;
+    if (typeof sessionId !== "string" || !sessionId.startsWith("cs_")) {
+      return res.status(400).json({ message: "A valid Checkout Session ID is required." });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.client_reference_id !== req.vendorId || session.metadata?.vendorId !== req.vendorId) {
+      return res.status(403).json({ message: "This Checkout Session belongs to another vendor." });
+    }
+    if (session.mode !== "payment" || session.status !== "complete" || session.payment_status !== "paid" || session.amount_total !== 2900 || session.currency !== "usd") {
+      return res.status(400).json({ message: "Payment is not complete yet." });
+    }
+    const transaction = await transactions.findOne({ stripeSessionId: session.id, vendorId: req.vendorId });
+    if (!transaction) return res.status(404).json({ message: "Checkout transaction was not found for this vendor." });
+
+    await activateVendorPremium(req.vendorId);
+    await transactions.updateOne(
+      { stripeSessionId: session.id, vendorId: req.vendorId },
+      { $set: {
+        plan: "premium",
+        amount: (session.amount_total || 0) / 100,
+        currency: session.currency || "usd",
+        status: "paid",
+      } }
+    );
+    res.json({ message: "Your one-time payment is confirmed. Premium is active for your account.", subscriptionPlan: "premium" });
+  } catch (err) {
+    console.error("POST /vendor/subscription/confirm:", err);
+    res.status(500).json({ message: "Could not verify the Stripe payment." });
+  }
 });
 
 // ===================== END VENDOR ROUTES =====================
