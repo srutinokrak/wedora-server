@@ -14,7 +14,6 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 
 
 // middleware
-app.use(express.json());
 app.use(cors());
 
 
@@ -37,6 +36,91 @@ const services = database.collection("services")
 const bookings = database.collection("bookings")
 const transactions = database.collection("transactions")
 const users = database.collection("user")
+
+app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+  const signature = req.headers["stripe-signature"]
+
+  if (!stripe || !webhookSecret) {
+    return res.status(503).json({ message: "Stripe webhook is not configured." })
+  }
+  if (typeof signature !== "string") {
+    return res.status(400).json({ message: "Missing Stripe signature." })
+  }
+
+  let event
+  try {
+    event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret)
+  } catch (err) {
+    console.error("Stripe webhook signature verification failed:", err.message)
+    return res.status(400).json({ message: "Invalid Stripe signature." })
+  }
+
+  try {
+    if (
+      event.type === "checkout.session.completed" ||
+      event.type === "checkout.session.async_payment_succeeded"
+    ) {
+      const session = event.data.object
+      if (session.payment_status !== "paid") {
+        return res.json({ received: true })
+      }
+
+      const vendorId = session.metadata?.vendorId
+      if (
+        session.mode !== "payment" ||
+        session.status !== "complete" ||
+        session.amount_total !== 2900 ||
+        session.currency !== "usd" ||
+        session.client_reference_id !== vendorId ||
+        session.metadata?.plan !== "premium" ||
+        session.metadata?.amountCents !== "2900" ||
+        typeof vendorId !== "string"
+      ) {
+        return res.status(400).json({ message: "Checkout session details did not match." })
+      }
+
+      const transaction = await transactions.findOne({
+        stripeSessionId: session.id,
+        vendorId,
+        plan: "premium",
+        amount: 29,
+        currency: "usd",
+      })
+      if (!transaction) {
+        return res.status(500).json({ message: "Checkout transaction was not found." })
+      }
+      if (transaction.status !== "pending" && transaction.status !== "paid") {
+        return res.json({ received: true })
+      }
+
+      await transactions.updateOne(
+        { _id: transaction._id, status: "pending" },
+        { $set: { status: "paid" } }
+      )
+      await activateVendorPremium(vendorId)
+    } else if (event.type === "checkout.session.expired") {
+      const session = event.data.object
+      await transactions.updateOne(
+        { stripeSessionId: session.id, status: "pending" },
+        { $set: { status: "expired" } }
+      )
+    } else if (event.type === "checkout.session.async_payment_failed") {
+      const session = event.data.object
+      await transactions.updateOne(
+        { stripeSessionId: session.id, status: "pending" },
+        { $set: { status: "failed" } }
+      )
+    }
+
+    res.json({ received: true })
+  } catch (err) {
+    console.error(`Stripe webhook ${event.type} failed:`, err)
+    res.status(500).json({ message: "Could not process Stripe event." })
+  }
+})
+
+app.use(express.json())
 
 async function vendorCanActivateService(vendorId, serviceId) {
   const vendor = await users.findOne({ _id: vendorId, role: "vendor" }, { projection: { subscriptionPlan: 1 } });
