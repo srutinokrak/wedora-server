@@ -11,11 +11,8 @@ const app = express();
 const port = process.env.PORT || 5000;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
-
-
 // middleware
 app.use(cors());
-
 
 const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-mmcgsdf-shard-00-00.m4xd1qi.mongodb.net:27017,ac-mmcgsdf-shard-00-01.m4xd1qi.mongodb.net:27017,ac-mmcgsdf-shard-00-02.m4xd1qi.mongodb.net:27017/?ssl=true&replicaSet=atlas-wbfsly-shard-0&authSource=admin`);
 
@@ -118,10 +115,7 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
       )
     } else if (event.type === "customer.subscription.updated") {
       const subscription = event.data.object
-      const vendorId = subscription.metadata?.vendorId
-      const vendor = typeof vendorId === "string"
-        ? await users.findOne({ _id: vendorId, role: "vendor" })
-        : await users.findOne({ stripeSubscriptionId: subscription.id, role: "vendor" })
+      const vendor = await users.findOne({ stripeSubscriptionId: subscription.id, role: "vendor" })
       if (vendor) {
         if (subscription.status === "active" || subscription.status === "trialing") {
           await activateVendorPremium(vendor._id.toString(), subscription)
@@ -135,10 +129,7 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (re
       }
     } else if (event.type === "customer.subscription.deleted") {
       const subscription = event.data.object
-      const vendorId = subscription.metadata?.vendorId
-      const vendor = typeof vendorId === "string"
-        ? await users.findOne({ _id: vendorId, role: "vendor" })
-        : await users.findOne({ stripeSubscriptionId: subscription.id, role: "vendor" })
+      const vendor = await users.findOne({ stripeSubscriptionId: subscription.id, role: "vendor" })
       if (vendor) await deactivateVendorPremium(vendor._id.toString())
     } else if (event.type === "invoice.payment_failed") {
       const invoice = event.data.object
