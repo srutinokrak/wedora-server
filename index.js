@@ -13,7 +13,7 @@ const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
 
-// middleware
+// Middleware 
 app.use(cors());
 
 const client = new MongoClient(
