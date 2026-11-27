@@ -13,7 +13,7 @@ const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
 
-// Middleware 
+// Middleware
 app.use(cors());
 
 const client = new MongoClient(
@@ -642,12 +642,10 @@ app.patch("/admin/services/:id", verifyAdminJwt, async (req, res) => {
       (updates.availability === "active" || updates.status === "approved") &&
       !(await vendorCanActivateService(currentService.vendorId, req.params.id))
     ) {
-      return res
-        .status(403)
-        .json({
-          message:
-            "Free vendors can publish up to 3 active services. Upgrade to Premium to publish more.",
-        });
+      return res.status(403).json({
+        message:
+          "Free vendors can publish up to 3 active services. Upgrade to Premium to publish more.",
+      });
     }
     const result = await services.findOneAndUpdate(
       { _id: new ObjectId(req.params.id) },
@@ -736,11 +734,9 @@ app.post("/customer/bookings", verifyCustomerJwt, async (req, res) => {
       typeof eventDate !== "string" ||
       !/^\d{4}-\d{2}-\d{2}$/.test(eventDate)
     ) {
-      return res
-        .status(400)
-        .json({
-          message: "Event date must be a valid date in YYYY-MM-DD format.",
-        });
+      return res.status(400).json({
+        message: "Event date must be a valid date in YYYY-MM-DD format.",
+      });
     }
     const [year, month, day] = eventDate.split("-").map(Number);
     const parsedEventDate = new Date(Date.UTC(year, month - 1, day));
@@ -799,12 +795,10 @@ app.post("/customer/bookings", verifyCustomerJwt, async (req, res) => {
       status: { $in: ["pending", "accepted"] },
     });
     if (existingRequest)
-      return res
-        .status(409)
-        .json({
-          message:
-            "This service already has an active booking request for that event date.",
-        });
+      return res.status(409).json({
+        message:
+          "This service already has an active booking request for that event date.",
+      });
 
     const booking = {
       serviceId: service._id.toString(),
@@ -827,13 +821,11 @@ app.post("/customer/bookings", verifyCustomerJwt, async (req, res) => {
       createdAt: new Date(),
     };
     const result = await bookings.insertOne(booking);
-    res
-      .status(201)
-      .json({
-        ...booking,
-        _id: result.insertedId,
-        id: result.insertedId.toString(),
-      });
+    res.status(201).json({
+      ...booking,
+      _id: result.insertedId,
+      id: result.insertedId.toString(),
+    });
   } catch (err) {
     console.error("POST /customer/bookings:", err);
     res.status(500).json({ message: "Could not submit booking request." });
@@ -928,12 +920,10 @@ app.post("/vendor/services", verifyVendorJwt, async (req, res) => {
 
     // Validate required fields
     if (!serviceName || !category || !description || !price || !location) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "Missing required fields: serviceName, category, description, price, location.",
-        });
+      return res.status(400).json({
+        message:
+          "Missing required fields: serviceName, category, description, price, location.",
+      });
     }
 
     // Free plan: max 3 active+approved services
@@ -943,12 +933,10 @@ app.post("/vendor/services", verifyVendorJwt, async (req, res) => {
       availability: "active",
     });
     if (activeCount >= 3 && req.vendorUser.subscriptionPlan !== "premium") {
-      return res
-        .status(403)
-        .json({
-          message:
-            "Free plan limit reached. Upgrade to premium to add more services.",
-        });
+      return res.status(403).json({
+        message:
+          "Free plan limit reached. Upgrade to premium to add more services.",
+      });
     }
 
     const doc = {
@@ -969,13 +957,11 @@ app.post("/vendor/services", verifyVendorJwt, async (req, res) => {
     };
 
     const result = await services.insertOne(doc);
-    res
-      .status(201)
-      .json({
-        ...doc,
-        _id: result.insertedId,
-        id: result.insertedId.toString(),
-      });
+    res.status(201).json({
+      ...doc,
+      _id: result.insertedId,
+      id: result.insertedId.toString(),
+    });
   } catch (err) {
     console.error("POST /vendor/services:", err);
     res.status(500).json({ message: "Could not create service." });
@@ -1034,12 +1020,10 @@ app.patch("/vendor/services/:id", verifyVendorJwt, async (req, res) => {
       existing.status === "approved" &&
       !(await vendorCanActivateService(req.vendorId, req.params.id))
     ) {
-      return res
-        .status(403)
-        .json({
-          message:
-            "Free vendors can publish up to 3 active services. Upgrade to Premium to publish more.",
-        });
+      return res.status(403).json({
+        message:
+          "Free vendors can publish up to 3 active services. Upgrade to Premium to publish more.",
+      });
     }
 
     const result = await services.findOneAndUpdate(
@@ -1170,7 +1154,6 @@ app.get("/vendor/overview", verifyVendorJwt, async (req, res) => {
   }
 });
 
-
 app.post("/vendor/subscription/checkout", verifyVendorJwt, async (req, res) => {
   try {
     if (!stripe || !process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")) {
@@ -1255,11 +1238,9 @@ app.get(
         { projection: { status: 1 } },
       );
       if (!transaction)
-        return res
-          .status(404)
-          .json({
-            message: "Checkout transaction was not found for this vendor.",
-          });
+        return res.status(404).json({
+          message: "Checkout transaction was not found for this vendor.",
+        });
       res.json({ status: transaction.status });
     } catch (err) {
       console.error("GET /vendor/subscription/status/:sessionId:", err);
